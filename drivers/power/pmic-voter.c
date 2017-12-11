@@ -17,6 +17,7 @@
 #include <linux/printk.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/device.h>
 
 #include <linux/pmic-voter.h>
 
@@ -25,8 +26,6 @@
 
 static DEFINE_SPINLOCK(votable_list_slock);
 static LIST_HEAD(votable_list);
-
-static struct dentry *debug_root;
 
 struct client_vote {
 	bool	enabled;
@@ -37,16 +36,19 @@ struct votable {
 	const char		*name;
 	struct list_head	list;
 	struct client_vote	votes[NUM_MAX_CLIENTS];
+ 	struct device		*dev;
 	int			num_clients;
 	int			type;
 	int			effective_client_id;
 	int			effective_result;
+	int			default_result;
 	struct mutex		vote_lock;
 	void			*data;
-	int			(*callback)(struct votable *votable,
-						void *data,
-						int effective_result,
-						const char *effective_client);
+	int (*callback)(struct device *dev,
+			int effective_result,
+			int effective_client,
+			int last_result,
+			int last_client);
 	char			*client_strs[NUM_MAX_CLIENTS];
 	bool			voted_on;
 	struct dentry		*root;
@@ -231,10 +233,8 @@ bool is_client_vote_enabled(struct votable *votable, const char *client_str)
  *	The value the client voted for. -EINVAL is returned if the client
  *	is not enabled or the client is not found.
  */
-int get_client_vote_locked(struct votable *votable, const char *client_str)
+int get_client_vote_locked(struct votable *votable, int client_id)
 {
-	int client_id = get_client_id(votable, client_str);
-
 	if (client_id < 0)
 		return -EINVAL;
 
@@ -245,12 +245,41 @@ int get_client_vote_locked(struct votable *votable, const char *client_str)
 	return votable->votes[client_id].value;
 }
 
-int get_client_vote(struct votable *votable, const char *client_str)
+int get_client_vote(struct votable *votable, int client_id)
 {
 	int value;
 
 	lock_votable(votable);
-	value = get_client_vote_locked(votable, client_str);
+	value = get_client_vote_locked(votable, client_id);
+	unlock_votable(votable);
+	return value;
+}
+
+/**
+ * get_client_vote_by_name() -
+ * get_client_vote_by_name_locked() -
+ *		The unlocked and locked variants of getting a client's voted
+ *		value.
+ * @votable:	the votable object
+ * @client_str: client of interest
+ *
+ * Returns:
+ *	The value the client voted for. -EINVAL is returned if the client
+ *	is not enabled or the client is not found.
+ */
+int get_client_vote_by_name_locked(struct votable *votable, const char *client_str)
+{
+	return get_client_vote_locked(votable,
+		get_client_id(votable, client_str));
+}
+
+int get_client_by_name_vote(struct votable *votable, const char *client_str)
+{
+	int value;
+
+	lock_votable(votable);
+	value = get_client_vote_locked(votable,
+		get_client_id(votable, client_str));
 	unlock_votable(votable);
 	return value;
 }
@@ -326,44 +355,27 @@ const char *get_effective_client(struct votable *votable)
 	return client_str;
 }
 
-/**
- * vote() -
- *
- * @votable:	the votable object
- * @client_str: the voting client
- * @enabled:	This provides a means for the client to exclude himself from
- *		election. This clients val (the next argument) will be
- *		considered only when he has enabled his participation.
- *		Note that this takes a differnt meaning for SET_ANY type, as
- *		there is no concept of abstaining from participation.
- *		Enabled is treated as the boolean value the client is voting.
- * @val:	The vote value. This is ignored for SET_ANY votable types.
- *		For MIN, MAX votable types this value is used as the
- *		clients vote value when the enabled is true, this value is
- *		ignored if enabled is false.
- *
- * The callback is called only when there is a change in the election results or
- * if it is the first time someone is voting.
- *
- * Returns:
- *	The return from the callback when present and needs to be called
- *	or zero.
- */
-int vote(struct votable *votable, const char *client_str, bool enabled, int val)
+int get_effective_client_id(struct votable *votable)
+{
+	int id;
+
+	lock_votable(votable);
+	id = get_effective_client_id_locked(votable);
+	unlock_votable(votable);
+	return id;
+}
+
+int get_effective_client_id_locked(struct votable *votable)
+{
+	return votable->effective_client_id;
+}
+
+static int __vote(struct votable *votable, int client_id, bool enabled, int val)
 {
 	int effective_id = -EINVAL;
 	int effective_result;
-	int client_id;
 	int rc = 0;
 	bool similar_vote = false;
-
-	lock_votable(votable);
-
-	client_id = get_client_id(votable, client_str);
-	if (client_id < 0) {
-		rc = client_id;
-		goto out;
-	}
 
 	/*
 	 * for SET_ANY the val is to be ignored, set it
@@ -375,9 +387,9 @@ int vote(struct votable *votable, const char *client_str, bool enabled, int val)
 
 	if ((votable->votes[client_id].enabled == enabled) &&
 		(votable->votes[client_id].value == val)) {
-		pr_debug("%s: %s,%d same vote %s of val=%d\n",
+		pr_debug("%s: %d same vote %s of val=%d\n",
 				votable->name,
-				client_str, client_id,
+				client_id,
 				enabled ? "on" : "off",
 				val);
 		similar_vote = true;
@@ -387,15 +399,15 @@ int vote(struct votable *votable, const char *client_str, bool enabled, int val)
 	votable->votes[client_id].value = val;
 
 	if (similar_vote && votable->voted_on) {
-		pr_debug("%s: %s,%d Ignoring similar vote %s of val=%d\n",
+		pr_debug("%s: %d Ignoring similar vote %s of val=%d\n",
 			votable->name,
-			client_str, client_id, enabled ? "on" : "off", val);
-		goto out;
+			client_id, enabled ? "on" : "off", val);
+		return -EINVAL;
 	}
 
-	pr_debug("%s: %s,%d voting %s of val=%d\n",
+	pr_debug("%s: %d voting %s of val=%d\n",
 		votable->name,
-		client_str, client_id, enabled ? "on" : "off", val);
+		client_id, enabled ? "on" : "off", val);
 	switch (votable->type) {
 	case VOTE_MIN:
 		vote_min(votable, client_id, &effective_result, &effective_id);
@@ -424,14 +436,87 @@ int vote(struct votable *votable, const char *client_str, bool enabled, int val)
 			get_client_str(votable, effective_id),
 			effective_id);
 		if (votable->callback && !votable->force_active)
-			rc = votable->callback(votable, votable->data,
-					effective_result,
-					get_client_str(votable, effective_id));
+			rc = votable->callback(votable->dev, effective_result,
+						effective_id, val, client_id);
 	}
 
 	votable->voted_on = true;
-out:
+	return 0;
+}
+
+/**
+ * vote_by_name() -
+ *
+ * @votable:	the votable object
+ * @client_str: the voting client
+ * @enabled:	This provides a means for the client to exclude himself from
+ *		election. This clients val (the next argument) will be
+ *		considered only when he has enabled his participation.
+ *		Note that this takes a differnt meaning for SET_ANY type, as
+ *		there is no concept of abstaining from participation.
+ *		Enabled is treated as the boolean value the client is voting.
+ * @val:	The vote value. This is ignored for SET_ANY votable types.
+ *		For MIN, MAX votable types this value is used as the
+ *		clients vote value when the enabled is true, this value is
+ *		ignored if enabled is false.
+ *
+ * The callback is called only when there is a change in the election results or
+ * if it is the first time someone is voting.
+ *
+ * Returns:
+ *	The return from the callback when present and needs to be called
+ *	or zero.
+ */
+int vote_by_name(struct votable *votable, const char *client_str, bool enabled, int val)
+{
+	int client_id;
+	int rc = 0;
+
+	lock_votable(votable);
+
+	client_id = get_client_id(votable, client_str);
+	if (client_id < 0) {
+		return client_id; // rc
+	}
+
+	rc = __vote(votable, client_id, enabled, val);
+
 	unlock_votable(votable);
+
+	return rc;
+}
+
+/**
+ * vote() -
+ *
+ * @votable:	the votable object
+ * @client_id:  the voting client
+ * @enabled:	This provides a means for the client to exclude himself from
+ *		election. This clients val (the next argument) will be
+ *		considered only when he has enabled his participation.
+ *		Note that this takes a differnt meaning for SET_ANY type, as
+ *		there is no concept of abstaining from participation.
+ *		Enabled is treated as the boolean value the client is voting.
+ * @val:	The vote value. This is ignored for SET_ANY votable types.
+ *		For MIN, MAX votable types this value is used as the
+ *		clients vote value when the enabled is true, this value is
+ *		ignored if enabled is false.
+ *
+ * The callback is called only when there is a change in the election results or
+ * if it is the first time someone is voting.
+ *
+ * Returns:
+ *	The return from the callback when present and needs to be called
+ *	or zero.
+ */
+int vote(struct votable *votable, int client_id, bool enabled, int val)
+{
+	int rc = 0;
+
+	lock_votable(votable);
+	rc = __vote(votable, client_id, enabled, val);
+	unlock_votable(votable);
+
 	return rc;
 }
 
@@ -441,10 +526,9 @@ int rerun_election(struct votable *votable)
 
 	lock_votable(votable);
 	if (votable->callback)
-		rc = votable->callback(votable,
-				votable->data,
-			votable->effective_result,
-			get_client_str(votable, votable->effective_client_id));
+		rc = votable->callback(votable->dev,
+					votable->effective_result, votable->effective_client_id,
+					votable->default_result, votable->effective_client_id);
 	unlock_votable(votable);
 	return rc;
 }
@@ -495,13 +579,13 @@ static int force_active_set(void *data, u64 val)
 		goto out;
 
 	if (votable->force_active) {
-		rc = votable->callback(votable, votable->data,
-			votable->force_val,
-			DEBUG_FORCE_CLIENT);
+		rc = votable->callback(votable->dev,
+					votable->effective_result, votable->effective_client_id,
+					votable->force_val, votable->effective_client_id);
 	} else {
-		rc = votable->callback(votable, votable->data,
-			votable->effective_result,
-			get_client_str(votable, votable->effective_client_id));
+		rc = votable->callback(votable->dev,
+					votable->effective_result, votable->effective_client_id,
+					votable->default_result, votable->effective_client_id);
 	}
 out:
 	unlock_votable(votable);
@@ -568,106 +652,73 @@ static const struct file_operations votable_status_ops = {
 	.release	= single_release,
 };
 
-struct votable *create_votable(const char *name,
-				int votable_type,
-				int (*callback)(struct votable *votable,
-					void *data,
+struct votable *create_votable(struct device *dev, const char *name,
+					int votable_type,
+					int num_clients,
+#ifdef CONFIG_LGE_PM
 					int effective_result,
-					const char *effective_client),
-				void *data)
+#endif
+					int default_result,
+					int (*callback)(struct device *dev,
+							int effective_result,
+							int effective_client,
+							int last_result,
+							int last_client)
+					)
 {
-	struct votable *votable;
+	int i;
 	unsigned long flags;
+	struct votable *votable = devm_kzalloc(dev, sizeof(struct votable),
+							GFP_KERNEL);
 
-	votable = find_votable(name);
-	if (votable)
-		return ERR_PTR(-EEXIST);
-
-	if (debug_root == NULL) {
-		debug_root = debugfs_create_dir("pmic-votable", NULL);
-		if (!debug_root) {
-			pr_err("Couldn't create debug dir\n");
-			return ERR_PTR(-ENOMEM);
-		}
-	}
-
-	if (votable_type >= NUM_VOTABLE_TYPES) {
-		pr_err("Invalid votable_type specified for voter\n");
-		return ERR_PTR(-EINVAL);
-	}
-
-	votable = kzalloc(sizeof(struct votable), GFP_KERNEL);
 	if (!votable)
 		return ERR_PTR(-ENOMEM);
 
-	votable->name = kstrdup(name, GFP_KERNEL);
-	if (!votable->name) {
-		kfree(votable);
-		return ERR_PTR(-ENOMEM);
+	if (!callback) {
+		dev_err(dev, "Invalid callback specified for voter\n");
+		return ERR_PTR(-EINVAL);
 	}
 
-	votable->num_clients = NUM_MAX_CLIENTS;
+	if (votable_type >= NUM_VOTABLE_TYPES) {
+		dev_err(dev, "Invalid votable_type specified for voter\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	if (num_clients > NUM_MAX_CLIENTS) {
+		dev_err(dev, "Invalid num_clients specified for voter\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	votable->dev = dev;
+	votable->name = name;
+	votable->num_clients = num_clients;
 	votable->callback = callback;
 	votable->type = votable_type;
-	votable->data = data;
+	votable->default_result = default_result;
 	mutex_init(&votable->vote_lock);
 
+#ifdef CONFIG_LGE_PM
+	/*
+	 * These values will be used before the first vote is made and will then
+	 * be discarded
+	 */
+	votable->effective_result = effective_result;
+	votable->effective_client_id = 0;
+#else
 	/*
 	 * Because effective_result and client states are invalid
 	 * before the first vote, initialize them to -EINVAL
 	 */
 	votable->effective_result = -EINVAL;
-	if (votable->type == VOTE_SET_ANY)
-		votable->effective_result = 0;
 	votable->effective_client_id = -EINVAL;
+#endif
 
 	spin_lock_irqsave(&votable_list_slock, flags);
 	list_add(&votable->list, &votable_list);
 	spin_unlock_irqrestore(&votable_list_slock, flags);
 
-	votable->root = debugfs_create_dir(name, debug_root);
-	if (!votable->root) {
-		pr_err("Couldn't create debug dir %s\n", name);
-		kfree(votable->name);
-		kfree(votable);
-		return ERR_PTR(-ENOMEM);
-	}
-
-	votable->status_ent = debugfs_create_file("status", S_IFREG | S_IRUGO,
-				  votable->root, votable,
-				  &votable_status_ops);
-	if (!votable->status_ent) {
-		pr_err("Couldn't create status dbg file for %s\n", name);
-		debugfs_remove_recursive(votable->root);
-		kfree(votable->name);
-		kfree(votable);
-		return ERR_PTR(-EEXIST);
-	}
-
-	votable->force_val_ent = debugfs_create_u32("force_val",
-					S_IFREG | S_IWUSR | S_IRUGO,
-					votable->root,
-					&(votable->force_val));
-
-	if (!votable->force_val_ent) {
-		pr_err("Couldn't create force_val dbg file for %s\n", name);
-		debugfs_remove_recursive(votable->root);
-		kfree(votable->name);
-		kfree(votable);
-		return ERR_PTR(-EEXIST);
-	}
-
-	votable->force_active_ent = debugfs_create_file("force_active",
-					S_IFREG | S_IRUGO,
-					votable->root, votable,
-					&votable_force_ops);
-	if (!votable->force_active_ent) {
-		pr_err("Couldn't create force_active dbg file for %s\n", name);
-		debugfs_remove_recursive(votable->root);
-		kfree(votable->name);
-		kfree(votable);
-		return ERR_PTR(-EEXIST);
-	}
+	for (i = 0; i < votable->num_clients; i++)
+		votable->votes[i].enabled = false;
 
 	return votable;
 }

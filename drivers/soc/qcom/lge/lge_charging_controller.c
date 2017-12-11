@@ -645,6 +645,7 @@ static void usb_current_max_check_work(struct work_struct *work)
 	enum power_supply_type usb_supply_type;
 	int current_icl;
 
+#ifdef CONFIG_LGE_USB_FLOATED_CHARGER_DETECT
 	the_controller->usb_psy->get_property(the_controller->usb_psy,
 			POWER_SUPPLY_PROP_APSD_RERUN_NEED, &pval);
 
@@ -652,6 +653,7 @@ static void usb_current_max_check_work(struct work_struct *work)
 		pr_err("%s : skip current_max_check work\n", __func__);
 		return;
 	}
+#endif
 
 	the_controller->usb_psy->get_property(the_controller->usb_psy,
 			POWER_SUPPLY_PROP_TYPE, &pval);

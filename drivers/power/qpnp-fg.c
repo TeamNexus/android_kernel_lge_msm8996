@@ -742,12 +742,12 @@ struct fg_chip {
 #ifdef CONFIG_LGE_PM_CHARGERLOGO_WAIT_FOR_FG_INIT
 	int			first_soc_est_done;
 #endif
-#ifdef CONFIG_LGE_PM_SOC_SCALING
+// #ifdef CONFIG_LGE_PM_SOC_SCALING
 	int			batt_scale_criteria;
-#endif
-#ifdef CONFIG_LGE_PM_SOC_RECHARGING_WA
+// #endif
+// #ifdef CONFIG_LGE_PM_SOC_RECHARGING_WA
 	int			batt_recharge_threshold;
-#endif
+// #endif
 #ifdef CONFIG_LGE_PM_CYCLE_BASED_CHG_VOLTAGE
 	u32			batt_life_cycle_set[MAX_CYCLE_STEP];
 	u32			batt_life_cycle_offset[MAX_CYCLE_STEP];

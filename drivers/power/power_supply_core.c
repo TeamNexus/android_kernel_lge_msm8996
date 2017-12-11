@@ -860,7 +860,13 @@ static int __power_supply_register(struct device *parent,
 				   struct power_supply *psy, bool ws)
 {
 	struct device *dev;
+	char *dev_name_wa;
 	int rc;
+
+	dev_name_wa = kzalloc(sizeof(*dev_name_wa), GFP_KERNEL);
+	if (!dev_name_wa)
+		return -ENOMEM;
+	dev_name_wa[0] = 0;
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
 	if (!dev)
@@ -875,6 +881,10 @@ static int __power_supply_register(struct device *parent,
 	dev_set_drvdata(dev, psy);
 	psy->dev = dev;
 
+	// workaround?
+	(&dev->kobj)->name = dev_name_wa;
+
+	dev_info(dev, "chganging name to %s\n", (psy->name ? psy->name : "NULL"));
 	rc = dev_set_name(dev, "%s", psy->name);
 	if (rc)
 		goto dev_set_name_failed;

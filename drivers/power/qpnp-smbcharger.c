@@ -38,7 +38,7 @@
 #include <linux/of_batterydata.h>
 #include <linux/msm_bcl.h>
 #include <linux/ktime.h>
-#include "pmic-voter.h"
+#include <linux/pmic-voter.h>
 
 #ifdef CONFIG_LGE_PM_LGE_POWER_CORE
 #include <soc/qcom/lge/power/lge_power_class.h>
@@ -67,9 +67,9 @@
 #include <soc/qcom/lge/power/lge_board_revision.h>
 #endif
 
-#ifdef CONFIG_LGE_PM_WAKE_LOCK_FOR_CHG_LOGO
+// #ifdef CONFIG_LGE_PM_WAKE_LOCK_FOR_CHG_LOGO
 #include <soc/qcom/lge/board_lge.h>
-#endif
+// #endif
 
 #ifdef CONFIG_LGE_PM
 #include <linux/wakelock.h>
@@ -6405,7 +6405,9 @@ static void smbchg_hvdcp_det_prepare_work(struct work_struct *work)
 	}
 #endif
 
+#ifdef CONFIG_LGE_USB_FACTORY
 prepare_hvdcp_detection:
+#endif
 	/* enable HVDCP */
 	rc = smbchg_sec_masked_write(chip,
 				chip->usb_chgpth_base + CHGPTH_CFG,
@@ -6440,8 +6442,10 @@ prepare_hvdcp_detection:
 					usb_supply_type, usb_type_name);
 
 			prop.intval = 0;
+#ifdef CONFIG_LGE_USB_FLOATED_CHARGER_DETECT
 			chip->usb_psy->set_property(chip->usb_psy,
 				POWER_SUPPLY_PROP_APSD_RERUN_NEED, &prop);
+#endif
 
 			smbchg_change_usb_supply_type(chip, usb_supply_type);
 		}
